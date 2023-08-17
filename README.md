@@ -11,38 +11,34 @@ CLIP (Contrastive Language-Image Pre-Training) is a neural network trained on a 
 ![CLIP](CLIP.png)
 
 
-
 ## Usage
 
-First, [install PyTorch 1.7.1](https://pytorch.org/get-started/locally/) (or later) and torchvision, as well as small additional dependencies, and then install this repo as a Python package. On a CUDA GPU machine, the following will do the trick:
+First, [install MindSpore 2.0.0](https://www.mindspore.cn/install) (or later), as well as small additional dependencies, and then install this repo as a Python package.
 
 ```bash
-$ conda install --yes -c pytorch pytorch=1.7.1 torchvision cudatoolkit=11.0
-$ pip install ftfy regex tqdm
+$ pip install ftfy regex tqdm mindspore
 $ pip install git+https://github.com/openai/CLIP.git
 ```
 
-Replace `cudatoolkit=11.0` above with the appropriate CUDA version on your machine or `cpuonly` when installing on a machine without a GPU.
+Example code of CLIP:
 
 ```python
-import torch
 import clip
 from PIL import Image
+from mindspore import Tensor,nn
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load("ViT-B/32", device=device)
+model, preprocess = clip.load("./ViT-B-32.ckpt", device="Ascend")
 
-image = preprocess(Image.open("CLIP.png")).unsqueeze(0).to(device)
-text = clip.tokenize(["a diagram", "a dog", "a cat"]).to(device)
+image = Tensor(preprocess(Image.open("CLIP.png")))
+text = clip.tokenize(["a diagram", "a dog", "a cat"])
 
-with torch.no_grad():
-    image_features = model.encode_image(image)
-    text_features = model.encode_text(text)
-    
-    logits_per_image, logits_per_text = model(image, text)
-    probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+image_features = model.encode_image(image)
+text_features = model.encode_text(text)
 
-print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
+logits_per_image, logits_per_text = model(image, text)
+probs = nn.Softmax(axis=-1)(logits_per_image).numpy()
+
+print("Label probs:", probs)  # prints: [[0.9927937  0.00421067 0.00299571]]
 ```
 
 
@@ -54,15 +50,15 @@ The CLIP module `clip` provides the following methods:
 
 Returns the names of the available CLIP models.
 
-#### `clip.load(name, device=..., jit=False)`
+#### `clip.load(path, device=..., jit=False)`
 
-Returns the model and the TorchVision transform needed by the model, specified by the model name returned by `clip.available_models()`. It will download the model as necessary. The `name` argument can also be a path to a local checkpoint.
+Returns the model and the transform operations needed by the model, specified by the model name returned by `clip.available_models()`. The `path` argument is a path to a local checkpoint.
 
-The device to run the model can be optionally specified, and the default is to use the first CUDA device if there is any, otherwise the CPU. When `jit` is `False`, a non-JIT version of the model will be loaded.
+The device to run the model can be optionally specified, and the default is to use the Ascend device if there is any, otherwise the CPU.
 
 #### `clip.tokenize(text: Union[str, List[str]], context_length=77)`
 
-Returns a LongTensor containing tokenized sequences of given text input(s). This can be used as the input to the model
+Returns a Tensor containing tokenized sequences of given text input(s). This can be used as the input to the model.
 
 ---
 
@@ -89,38 +85,46 @@ Given a batch of images and a batch of text tokens, returns two Tensors, contain
 The code below performs zero-shot prediction using CLIP, as shown in Appendix B in the paper. This example takes an image from the [CIFAR-100 dataset](https://www.cs.toronto.edu/~kriz/cifar.html), and predicts the most likely labels among the 100 textual labels from the dataset.
 
 ```python
-import os
 import clip
-import torch
-from torchvision.datasets import CIFAR100
+from mindspore import ops, nn, Tensor
+import mindspore.dataset as ds
+from download import download
+from PIL import Image
 
 # Load the model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load('ViT-B/32', device)
+model, preprocess = clip.load("./ViT-B-32.ckpt", device="Ascend")
 
 # Download the dataset
-cifar100 = CIFAR100(root=os.path.expanduser("~/.cache"), download=True, train=False)
+cifar100_url = "https://mindspore-website.obs.cn-north-4.myhuaweicloud.com/notebook/datasets/cifar-100-binary.tar.gz"
+download(cifar100_url, "./", kind="tar.gz", replace=True)
+cifar100_iter = ds.Cifar100Dataset("cifar-100-binary", usage="test", shuffle=False)
+cifar100=[]
+for i in cifar100_iter:
+    cifar100.append([Image.fromarray(i[0].asnumpy()),int(i[2])])
 
 # Prepare the inputs
 image, class_id = cifar100[3637]
-image_input = preprocess(image).unsqueeze(0).to(device)
-text_inputs = torch.cat([clip.tokenize(f"a photo of a {c}") for c in cifar100.classes]).to(device)
+image_input = Tensor(preprocess(image))
+text_inputs = ops.cat([clip.tokenize(f"a photo of a {i[1]}") for i in cifar100])
 
 # Calculate features
-with torch.no_grad():
-    image_features = model.encode_image(image_input)
-    text_features = model.encode_text(text_inputs)
+image_features = model.encode_image(image_input)
+text_features = model.encode_text(text_inputs)
 
 # Pick the top 5 most similar labels for the image
 image_features /= image_features.norm(dim=-1, keepdim=True)
 text_features /= text_features.norm(dim=-1, keepdim=True)
-similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+similarity = nn.Softmax(axis=-1)(100.0 * image_features @ text_features.T)
 values, indices = similarity[0].topk(5)
 
 # Print the result
 print("\nTop predictions:\n")
+index2label=[]
+with open('./cifar-100-binar/fine_label_names.txt','r') as f:
+	for line in f:
+		index2label.append(line.strip('\n'))
 for value, index in zip(values, indices):
-    print(f"{cifar100.classes[index]:>16s}: {100 * value.item():.2f}%")
+    print(f"{index2label[index]:>16s}: {100 * float(value):.2f}%")
 ```
 
 The output will look like the following (the exact numbers may be slightly different depending on the compute device):
@@ -143,42 +147,41 @@ Note that this example uses the `encode_image()` and `encode_text()` methods tha
 The example below uses [scikit-learn](https://scikit-learn.org/) to perform logistic regression on image features.
 
 ```python
-import os
 import clip
-import torch
-
+from mindspore import ops
+import mindspore.dataset as ds
+from download import download
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR100
 from tqdm import tqdm
 
 # Load the model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load('ViT-B/32', device)
+model, preprocess = clip.load("./ViT-B-32.ckpt", device="Ascend")
 
 # Load the dataset
-root = os.path.expanduser("~/.cache")
-train = CIFAR100(root, download=True, train=True, transform=preprocess)
-test = CIFAR100(root, download=True, train=False, transform=preprocess)
-
+cifar100_url = "https://mindspore-website.obs.cn-north-4.myhuaweicloud.com/notebook/datasets/cifar-100-binary.tar.gz"
+download(cifar100_url, "./", kind="tar.gz", replace=True)
+cifar100_test_iter = ds.Cifar100Dataset("cifar-100-binary", usage="test", shuffle=False)
+cifar100_train_iter = ds.Cifar100Dataset("cifar-100-binary", usage="train", shuffle=False)
+cifar100_test_iter = cifar100_test_iter.map(preprocess, input_columns=["image"])
+cifar100_test_iter=cifar100_test_iter.batch(100)
+cifar100_train_iter = cifar100_train_iter.map(preprocess, input_columns=["image"])
+cifar100_train_iter=cifar100_train_iter.batch(100)
 
 def get_features(dataset):
     all_features = []
     all_labels = []
-    
-    with torch.no_grad():
-        for images, labels in tqdm(DataLoader(dataset, batch_size=100)):
-            features = model.encode_image(images.to(device))
+    for images, _, labels in tqdm(dataset):
+        features = model.encode_image(images)
+        all_features.append(features)
+        all_labels.append(labels)
 
-            all_features.append(features)
-            all_labels.append(labels)
+    return ops.cat(all_features).asnumpy(), ops.cat(all_labels).asnumpy()
 
-    return torch.cat(all_features).cpu().numpy(), torch.cat(all_labels).cpu().numpy()
 
 # Calculate the image features
-train_features, train_labels = get_features(train)
-test_features, test_labels = get_features(test)
+train_features, train_labels = get_features(cifar100_train_iter)
+test_features, test_labels = get_features(cifar100_test_iter)
 
 # Perform logistic regression
 classifier = LogisticRegression(random_state=0, C=0.316, max_iter=1000, verbose=1)
@@ -196,4 +199,3 @@ Note that the `C` value should be determined via a hyperparameter sweep using a 
 ## See Also
 
 * [OpenCLIP](https://github.com/mlfoundations/open_clip): includes larger and independently trained CLIP models up to ViT-G/14
-* [Hugging Face implementation of CLIP](https://huggingface.co/docs/transformers/model_doc/clip): for easier integration with the HF ecosystem

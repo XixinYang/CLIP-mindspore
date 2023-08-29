@@ -5,7 +5,6 @@ import numpy as np
 import mindspore as ms
 from mindspore import Tensor, Parameter, load_param_into_net, nn, ops
 from mindspore.ops.function.nn_func import multi_head_attention_forward
-from typing import List
 
 
 class Bottleneck(nn.Cell):
@@ -25,7 +24,7 @@ class Bottleneck(nn.Cell):
         self.bn2 = nn.BatchNorm2d(planes)
         self.relu2 = nn.ReLU()
 
-        self.avgpool = nn.AvgPool2d(stride, pad_mode='pad') if stride > 1 else nn.Identity()
+        self.avgpool = nn.AvgPool2d(kernel_size=stride, stride=stride, pad_mode='pad') if stride > 1 else nn.Identity()
 
         self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, has_bias=False, pad_mode='pad',
                                weight_init="uniform", bias_init="uniform")
@@ -38,7 +37,7 @@ class Bottleneck(nn.Cell):
         if stride > 1 or inplanes != planes * Bottleneck.expansion:
             # downsampling layer is prepended with an avgpool, and the subsequent convolution has stride 1
             self.downsample = nn.SequentialCell(OrderedDict([
-                ("-1", nn.AvgPool2d(stride, pad_mode='pad')),
+                ("9999", nn.AvgPool2d(kernel_size=stride, stride=stride, pad_mode='pad')),
                 ("0", nn.Conv2d(inplanes, planes * self.expansion, 1, stride=1, has_bias=False, pad_mode='pad',
                                 weight_init="uniform", bias_init="uniform")),
                 ("1", nn.BatchNorm2d(planes * self.expansion))
@@ -63,7 +62,7 @@ class Bottleneck(nn.Cell):
 class AttentionPool2d(nn.Cell):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
         super().__init__()
-        self.positional_embedding = Parameter(ops.randn(spacial_dim ** 2 + 1, embed_dim) / embed_dim ** 0.5, ms.float32)
+        self.positional_embedding = Parameter(ops.randn(spacial_dim ** 2 + 1, embed_dim,dtype=ms.float32) / embed_dim ** 0.5)
         self.k_proj = nn.Dense(embed_dim, embed_dim)
         self.q_proj = nn.Dense(embed_dim, embed_dim)
         self.v_proj = nn.Dense(embed_dim, embed_dim)
@@ -71,8 +70,7 @@ class AttentionPool2d(nn.Cell):
         self.num_heads = num_heads
 
     def construct(self, x):
-        B, C, H, W = x.shape
-        x = ops.flatten(x, start_dim=2).permute(2, 0, 1)  # NCHW -> (HW)NC
+        x = ops.flatten(x, start_dim=2).permute((2, 0, 1))  # NCHW -> (HW)NC
         x = ops.cat([x.mean(axis=0, keep_dims=True), x], axis=0)  # (HW+1)NC
         x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
         x, _ = multi_head_attention_forward(
@@ -87,12 +85,11 @@ class AttentionPool2d(nn.Cell):
             bias_k=None,
             bias_v=None,
             add_zero_attn=False,
-            dropout_p=0,
+            dropout_p=0.0,
             out_proj_weight=self.c_proj.weight,
             out_proj_bias=self.c_proj.bias,
             use_separate_proj_weight=True,
             training=self.training,
-            need_weights=False
         )
         return ops.squeeze(x, 0)
 
@@ -123,7 +120,7 @@ class ModifiedResNet(nn.Cell):
                                weight_init="uniform", bias_init="uniform")
         self.bn3 = nn.BatchNorm2d(width)
         self.relu3 = nn.ReLU()
-        self.avgpool = nn.AvgPool2d(2, pad_mode='pad')
+        self.avgpool = nn.AvgPool2d(kernel_size=2, pad_mode='pad', stride=2)
 
         # residual layers
         self._inplanes = width  # this is a *mutable* variable used during construction
@@ -189,8 +186,9 @@ class ResidualAttentionBlock(nn.Cell):
             return self.attn(x, x, x, need_weights=False)[0]
 
     def construct(self, x: Tensor):
-        x = x + self.attention(self.ln_1(x.to(ms.float32)).to(x.dtype))
-        x = x + self.mlp(self.ln_2(x.to(ms.float32)).to(x.dtype))
+        x_type=x.dtype
+        x = x + self.attention(self.ln_1(x.to(ms.float32)).to(x_type))
+        x = x + self.mlp(self.ln_2(x.to(ms.float32)).to(x_type))
         return x
 
 
@@ -226,17 +224,19 @@ class VisionTransformer(nn.Cell):
     def construct(self, x: Tensor):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape((x.shape[0], x.shape[1], -1))  # shape = [*, width, grid ** 2]
-        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = x.permute((0, 2, 1))  # shape = [*, grid ** 2, width]
         x = ops.cat([self.class_embedding.to(x.dtype) + ops.zeros((x.shape[0], 1, x.shape[-1]), dtype=x.dtype), x],
                     axis=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
-        x = self.ln_pre(x.to(ms.float32)).to(x.dtype)
+        x_type=x.dtype
+        x = self.ln_pre(x.to(ms.float32)).to(x_type)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
-        x = self.ln_post(x[:, 0, :].to(ms.float32)).to(x.dtype)
+        x_type = x.dtype
+        x = self.ln_post(x.to(ms.float32)[:, 0, :]).to(x_type)
 
         if self.proj is not None:
             x = x @ self.proj
@@ -307,7 +307,7 @@ class CLIP(nn.Cell):
 
         if isinstance(self.visual, ModifiedResNet):
             if self.visual.attnpool is not None:
-                std = self.visual.attnpool.c_proj.in_features ** -0.5
+                std = self.visual.attnpool.c_proj.in_channels ** -0.5
                 self.visual.attnpool.q_proj.weight.set_data(
                     ops.normal(self.visual.attnpool.q_proj.weight.shape, stddev=std, mean=0))
                 self.visual.attnpool.k_proj.weight.set_data(
@@ -385,21 +385,21 @@ def convert_weights(model: nn.Cell):
 
     def _convert_weights_to_fp16(l):
         if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Dense)):
-            l.weight = l.weight.half()
+            l.weight.to(ms.float16)
             if l.bias is not None:
-                l.bias = l.bias.half()
+                l.bias.to(ms.float16)
 
         if isinstance(l, nn.MultiheadAttention):
             for attr in [*[f"{s}_proj_weight" for s in ["in", "q", "k", "v"]], "in_proj_bias", "bias_k", "bias_v"]:
-                tensor = getattr(l, attr)
-                if tensor is not None:
-                    tensor = tensor.half()
+                param = getattr(l, attr)
+                if param is not None:
+                    param.to(ms.float16)
 
         for name in ["text_projection", "proj"]:
             if hasattr(l, name):
                 attr = getattr(l, name)
                 if attr is not None:
-                    attr = attr.half()
+                    attr.to(ms.float16)
 
     model.apply(_convert_weights_to_fp16)
 

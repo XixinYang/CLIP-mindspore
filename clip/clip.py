@@ -1,22 +1,24 @@
 import hashlib
 import os
-import urllib
+from urllib import request
 import warnings
-from typing import Any, Union, List
+from typing import List, Union
+
+from PIL import Image
 from pkg_resources import packaging
+from tqdm import tqdm
 
 import mindspore as ms
-from PIL import Image
-from mindspore.dataset.vision import Resize, CenterCrop, ToTensor, Normalize, Decode, ToPIL
-from mindspore.dataset.transforms import Compose
-from tqdm import tqdm
 from mindspore import Tensor, load_checkpoint
+from mindspore.dataset.transforms import Compose
+from mindspore.dataset.vision import CenterCrop, Normalize, Resize, ToPIL, ToTensor
 
 from .model import build_model
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer
 
 try:
     from mindspore.dataset.vision import Inter
+
     BICUBIC = Inter.BICUBIC
 except ImportError:
     BICUBIC = Image.BICUBIC
@@ -28,15 +30,15 @@ __all__ = ["available_models", "load", "tokenize"]
 _tokenizer = _Tokenizer()
 
 _MODELS = {
-    "RN50": "https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt",
-    "RN101": "https://openaipublic.azureedge.net/clip/models/8fa8567bab74a42d41c5915025a8e4538c3bdbe8804a470a72f30b0d94fab599/RN101.pt",
-    "RN50x4": "https://openaipublic.azureedge.net/clip/models/7e526bd135e493cef0776de27d5f42653e6b4c8bf9e0f653bb11773263205fdd/RN50x4.pt",
-    "RN50x16": "https://openaipublic.azureedge.net/clip/models/52378b407f34354e150460fe41077663dd5b39c54cd0bfd2b27167a4a06ec9aa/RN50x16.pt",
-    "RN50x64": "https://openaipublic.azureedge.net/clip/models/be1cfb55d75a9666199fb2206c106743da0f6468c9d327f3e0d0a543a9919d9c/RN50x64.pt",
-    "ViT-B/32": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
-    "ViT-B/16": "https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt",
-    "ViT-L/14": "https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt",
-    "ViT-L/14@336px": "https://openaipublic.azureedge.net/clip/models/3035c92b350959924f9f00213499208652fc7ea050643e8b385c2dac08641f02/ViT-L-14-336px.pt",
+    "RN50": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/RN50-5d39bdab.ckpt",
+    "RN101": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/RN101-a9edcaa9.ckpt",
+    "RN50x4": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/RN50x4-7b8cdb29.ckpt",
+    "RN50x16": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/RN50x16-66ea7861.ckpt",
+    "RN50x64": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/RN50x64-839951e0.ckpt",
+    "ViT-B/32": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/ViT_B_32-34c32b89.ckpt",
+    "ViT-B/16": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/ViT_B_16-99cbeeee.ckpt",
+    "ViT-L/14": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/ViT_L_14-1d8bde7f.ckpt",
+    "ViT-L/14@336px": "https://download.mindspore.cn/toolkits/mindcv/mindspore-clip/clip/ViT_L_14_336px-9ed46dee.ckpt",
 }
 
 
@@ -44,7 +46,7 @@ def _download(url: str, root: str):
     os.makedirs(root, exist_ok=True)
     filename = os.path.basename(url)
 
-    expected_sha256 = url.split("/")[-2]
+    expected_sha256 = url.split("/")[-1].split("-")[-1].split(".")[0]
     download_target = os.path.join(root, filename)
 
     if os.path.exists(download_target) and not os.path.isfile(download_target):
@@ -56,9 +58,10 @@ def _download(url: str, root: str):
         else:
             warnings.warn(f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file")
 
-    with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
-        with tqdm(total=int(source.info().get("Content-Length")), ncols=80, unit='iB', unit_scale=True,
-                  unit_divisor=1024) as loop:
+    with request.urlopen(url) as source, open(download_target, "wb") as output:
+        with tqdm(
+            total=int(source.info().get("Content-Length")), ncols=80, unit="iB", unit_scale=True, unit_divisor=1024
+        ) as loop:
             while True:
                 buffer = source.read(8192)
                 if not buffer:
@@ -67,7 +70,7 @@ def _download(url: str, root: str):
                 output.write(buffer)
                 loop.update(len(buffer))
 
-    if hashlib.sha256(open(download_target, "rb").read()).hexdigest() != expected_sha256:
+    if expected_sha256 not in hashlib.sha256(open(download_target, "rb").read()).hexdigest():
         raise RuntimeError("Model has been downloaded but the SHA256 checksum does not not match")
 
     return download_target
@@ -78,35 +81,40 @@ def _convert_image_to_rgb(image):
 
 
 def _transform(n_px):
-    return Compose([
-        ToPIL(),
-        Resize(n_px, interpolation=BICUBIC),
-        CenterCrop(n_px),
-        _convert_image_to_rgb,
-        ToTensor(),
-        Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711], is_hwc=False),
-    ])
+    return Compose(
+        [
+            ToPIL(),
+            Resize(n_px, interpolation=BICUBIC),
+            CenterCrop(n_px),
+            _convert_image_to_rgb,
+            ToTensor(),
+            Normalize([0.48145466, 0.4578275, 0.40821073], [0.26862954, 0.26130258, 0.27577711], is_hwc=False),
+        ]
+    )
+
 
 def available_models() -> List[str]:
     """Returns the names of available CLIP models"""
     return list(_MODELS.keys())
 
 
-def load(path: str, device: str = "Ascend", mode: int = 1):
-    """Load a CLIP model
+def load(name: str, device: str = "Ascend", mode: int = 1, download_root: str = None):
+    """Load a CLIP model and a set of transform operations to the image input.
 
     Parameters
     ----------
-    path : str
-        A model name listed by `clip.available_models()`, or the path to a model checkpoint containing the parameter_dict
+    name : str
+        A model name or the path to a model checkpoint containing the parameter_dict, model names are listed by
+        `clip.available_models()`.
 
     device : str
         The device to put the loaded model, must be one of CPU, GPU, Ascend
 
     mode : int
-        Whether to load the optimized JIT model or more hackable non-JIT model (default).
-        If yes, GRAPH_MODE is supposed to be used, set mode to be 0;
-        else use PYNATIVE_MODE and set mode to be 1.
+        GRAPH_MODE(0) or PYNATIVE_MODE(1).
+
+    download_root: str
+        Path to download the model files; by default, it uses "~/.cache/clip"
 
     Returns
     -------
@@ -114,13 +122,17 @@ def load(path: str, device: str = "Ascend", mode: int = 1):
         The CLIP model
 
     preprocess : Callable[[PIL.Image], mindspore.Tensor]
-        A mindspore vision transform that converts a PIL image into a tensor that the returned model can take as its input
+        A mindspore vision transform that converts a PIL image into a tensor that the returned model can
+        take as its input.
     """
     ms.set_context(device_target=device, mode=mode)
-    if os.path.isfile(path):
-        ckp_dict = load_checkpoint(path)
+    if name in _MODELS:
+        model_path = _download(_MODELS[name], download_root or os.path.expanduser("~/.cache/clip"))
+        ckp_dict = load_checkpoint(model_path)
+    elif os.path.isfile(name):
+        ckp_dict = load_checkpoint(name)
     else:
-        raise RuntimeError(f"Model {path} not found; available models = {available_models()}")
+        raise ValueError(f"{name} not found; available models = {available_models()}")
 
     model = build_model(ckp_dict)
     if str(device).lower() == "cpu":
@@ -162,6 +174,6 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 77, truncate: b
                 tokens[-1] = eot_token
             else:
                 raise RuntimeError(f"Input {texts[i]} is too long for context length {context_length}")
-        result[i, :len(tokens)] = Tensor(tokens)
+        result[i, : len(tokens)] = Tensor(tokens)
 
     return result
